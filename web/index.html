@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+</head>
+
+<body>
+    <div id="card-container"></div>
+    <button id="payBtn" disabled>Continue</button>
+    <div id="status"></div>
+
+    <script>
+        const params = new URLSearchParams(location.search);
+        const env = (params.get("env") || "sandbox").toLowerCase();
+        const appId = params.get("appId");
+        const locationId = params.get("locationId");
+
+        const script = document.createElement("script");
+        script.src = env === "production"
+            ? "https://web.squarecdn.com/v1/square.js"
+            : "https://sandbox.web.squarecdn.com/v1/square.js";
+        document.head.appendChild(script);
+
+        function post(obj) { window.parent.postMessage(obj, "*"); }
+        function setStatus(t) { document.getElementById("status").textContent = t || ""; }
+        function setEnabled(v) { document.getElementById("payBtn").disabled = !v; }
+
+        let card;
+
+        async function init() {
+            try {
+                if (!window.isSecureContext) {
+                    setStatus("Not a secure context.");
+                    post({ type: "squareError", message: "Not a secure context." });
+                    return;
+                }
+
+                if (!window.Square) { setTimeout(init, 50); return; }
+
+                const payments = window.Square.payments(appId, locationId);
+                card = await payments.card();
+                await card.attach("#card-container");
+                setEnabled(true);
+                post({ type: "squareReady" });
+            } catch (e) {
+                const msg = e?.message || String(e);
+                setStatus(msg);
+                post({ type: "squareError", message: msg });
+            }
+        }
+
+        async function tokenize() {
+            setEnabled(false);
+            setStatus("");
+            try {
+                const r = await card.tokenize();
+                if (r.status === "OK") post({ type: "squareToken", token: r.token });
+                else {
+                    const msg = (r.errors || []).map(x => x.message).join(" | ") || "Tokenize failed";
+                    setStatus(msg);
+                    post({ type: "squareError", message: msg });
+                    setEnabled(true);
+                }
+            } catch (e) {
+                const msg = e?.message || String(e);
+                setStatus(msg);
+                post({ type: "squareError", message: msg });
+                setEnabled(true);
+            }
+        }
+
+        document.getElementById("payBtn").addEventListener("click", tokenize);
+        init();
+    </script>
+</body>
+
+</html>
