@@ -13,8 +13,9 @@
     <script>
         const params = new URLSearchParams(location.search);
         const env = (params.get("env") || "sandbox").toLowerCase();
-        const appId = params.get("appId");
-        const locationId = params.get("locationId");
+        const appId = (params.get("appId") || "").trim();
+        const locationId = (params.get("locationId") || "").trim();
+        const parentOrigin = params.get("parentOrigin") || "*";
 
         const script = document.createElement("script");
         script.src = env === "production"
@@ -22,7 +23,7 @@
             : "https://sandbox.web.squarecdn.com/v1/square.js";
         document.head.appendChild(script);
 
-        function post(obj) { window.parent.postMessage(obj, "*"); }
+        function post(obj) { window.parent.postMessage(obj, parentOrigin); }
         function setStatus(t) { document.getElementById("status").textContent = t || ""; }
         function setEnabled(v) { document.getElementById("payBtn").disabled = !v; }
 
@@ -31,8 +32,27 @@
         async function init() {
             try {
                 if (!window.isSecureContext) {
-                    setStatus("Not a secure context.");
-                    post({ type: "squareError", message: "Not a secure context." });
+                    const msg = "Not a secure context.";
+                    setStatus(msg);
+                    post({ type: "squareError", message: msg });
+                    return;
+                }
+
+                if (!appId || !locationId) {
+                    const msg = `Missing appId or locationId. appId=${appId || "(empty)"} locationId=${locationId || "(empty)"}`;
+                    setStatus(msg);
+                    post({ type: "squareError", message: msg });
+                    return;
+                }
+
+                const appOk =
+                    (env === "sandbox" && appId.startsWith("sandbox-sq0idb-")) ||
+                    (env === "production" && appId.startsWith("sq0idb-"));
+
+                if (!appOk) {
+                    const msg = `Invalid applicationId format for env=${env}. appId=${appId}`;
+                    setStatus(msg);
+                    post({ type: "squareError", message: msg });
                     return;
                 }
 
