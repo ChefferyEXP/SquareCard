@@ -1,98 +1,211 @@
 <!doctype html>
 <html>
-
 <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; }
+    #card-container { margin: 10px 0; }
+    #payBtn { padding: 10px 14px; font-weight: 700; }
+    #status { margin-top: 10px; font-weight: 700; white-space: pre-wrap; }
+    #debug {
+      margin-top: 12px;
+      padding: 10px;
+      background: #111;
+      color: #0f0;
+      border-radius: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      max-height: 240px;
+      overflow: auto;
+    }
+  </style>
 </head>
-
 <body>
-    <div id="card-container"></div>
-    <button id="payBtn" disabled>Continue</button>
-    <div id="status"></div>
+  <div id="card-container"></div>
+  <button id="payBtn" disabled>Continue</button>
+  <div id="status"></div>
+  <div id="debug"></div>
 
-    <script>
-        const params = new URLSearchParams(location.search);
-        const env = (params.get("env") || "sandbox").toLowerCase();
-        const appId = (params.get("appId") || "").trim();
-        const locationId = (params.get("locationId") || "").trim();
-        const parentOrigin = params.get("parentOrigin") || "*";
+<script>
+  const params = new URLSearchParams(location.search);
+  const env = (params.get("env") || "sandbox").toLowerCase();
+  const appId = (params.get("appId") || "").trim();
+  const locationId = (params.get("locationId") || "").trim();
 
-        const script = document.createElement("script");
-        script.src = env === "production"
-            ? "https://web.squarecdn.com/v1/square.js"
-            : "https://sandbox.web.squarecdn.com/v1/square.js";
-        document.head.appendChild(script);
+  // If you pass this from Flutter, we can lock down postMessage.
+  // If you don’t pass it yet, we’ll still post to "*", but we’ll WARN loudly.
+  const parentOrigin = (params.get("parentOrigin") || "*").trim();
 
-        function post(obj) { window.parent.postMessage(obj, parentOrigin); }
-        function setStatus(t) { document.getElementById("status").textContent = t || ""; }
-        function setEnabled(v) { document.getElementById("payBtn").disabled = !v; }
+  const statusEl = document.getElementById("status");
+  const debugEl = document.getElementById("debug");
+  const btn = document.getElementById("payBtn");
 
-        let card;
+  function now() {
+    return new Date().toISOString().slice(11, 23);
+  }
 
-        async function init() {
-            try {
-                if (!window.isSecureContext) {
-                    const msg = "Not a secure context.";
-                    setStatus(msg);
-                    post({ type: "squareError", message: msg });
-                    return;
-                }
+  function log(line, obj) {
+    const msg = `[${now()}] ${line}` + (obj ? `\n${safeStringify(obj)}` : "");
+    debugEl.textContent = (msg + "\n\n" + debugEl.textContent).slice(0, 8000);
+    // Also send to parent (Flutter) so you can see in Dart if you want
+    post({ type: "squareDebug", message: line, detail: obj || null });
+  }
 
-                if (!appId || !locationId) {
-                    const msg = `Missing appId or locationId. appId=${appId || "(empty)"} locationId=${locationId || "(empty)"}`;
-                    setStatus(msg);
-                    post({ type: "squareError", message: msg });
-                    return;
-                }
+  function setStatus(t) {
+    statusEl.textContent = t || "";
+  }
 
-                const appOk =
-                    (env === "sandbox" && appId.startsWith("sandbox-sq0idb-")) ||
-                    (env === "production" && appId.startsWith("sq0idb-"));
+  function setEnabled(v) {
+    btn.disabled = !v;
+  }
 
-                if (!appOk) {
-                    const msg = `Invalid applicationId format for env=${env}. appId=${appId}`;
-                    setStatus(msg);
-                    post({ type: "squareError", message: msg });
-                    return;
-                }
+  function safeStringify(x) {
+    try {
+      return JSON.stringify(x, Object.getOwnPropertyNames(x), 2);
+    } catch (_) {
+      try { return String(x); } catch (_) { return "[unstringifiable]"; }
+    }
+  }
 
-                if (!window.Square) { setTimeout(init, 50); return; }
+  function post(obj) {
+    try {
+      window.parent.postMessage(obj, parentOrigin);
+    } catch (e) {
+      // If posting fails, at least log it locally
+      debugEl.textContent = `[${now()}] postMessage FAILED: ${e?.message || e}\n\n` + debugEl.textContent;
+    }
+  }
 
-                const payments = window.Square.payments(appId, locationId);
-                card = await payments.card();
-                await card.attach("#card-container");
-                setEnabled(true);
-                post({ type: "squareReady" });
-            } catch (e) {
-                const msg = e?.message || String(e);
-                setStatus(msg);
-                post({ type: "squareError", message: msg });
-            }
-        }
+  // Catch hidden errors
+  window.addEventListener("error", (e) => {
+    log("window.onerror", {
+      message: e.message,
+      filename: e.filename,
+      lineno: e.lineno,
+      colno: e.colno,
+      error: e.error ? { name: e.error.name, message: e.error.message, stack: e.error.stack } : null
+    });
+    post({ type: "squareError", message: `JS error: ${e.message}` });
+  });
 
-        async function tokenize() {
-            setEnabled(false);
-            setStatus("");
-            try {
-                const r = await card.tokenize();
-                if (r.status === "OK") post({ type: "squareToken", token: r.token });
-                else {
-                    const msg = (r.errors || []).map(x => x.message).join(" | ") || "Tokenize failed";
-                    setStatus(msg);
-                    post({ type: "squareError", message: msg });
-                    setEnabled(true);
-                }
-            } catch (e) {
-                const msg = e?.message || String(e);
-                setStatus(msg);
-                post({ type: "squareError", message: msg });
-                setEnabled(true);
-            }
-        }
+  window.addEventListener("unhandledrejection", (e) => {
+    const reason = e.reason;
+    log("unhandledrejection", {
+      reasonType: typeof reason,
+      reason: reason,
+      reasonMessage: reason?.message,
+      reasonName: reason?.name,
+      reasonStack: reason?.stack
+    });
+    post({ type: "squareError", message: `Promise rejection: ${reason?.message || reason}` });
+  });
 
-        document.getElementById("payBtn").addEventListener("click", tokenize);
-        init();
-    </script>
-</body>
+  // Load Square script
+  const script = document.createElement("script");
+  script.src = env === "production"
+    ? "https://web.squarecdn.com/v1/square.js"
+    : "https://sandbox.web.squarecdn.com/v1/square.js";
 
-</html>
+  script.onload = () => log("Square script loaded", { src: script.src });
+  script.onerror = (e) => {
+    log("Square script FAILED to load", { src: script.src, error: e });
+    setStatus("Square JS failed to load.");
+    post({ type: "squareError", message: "Square JS failed to load." });
+  };
+
+  document.head.appendChild(script);
+
+  let card;
+
+  async function waitForSquare(maxMs = 8000) {
+    const start = Date.now();
+    while (!window.Square) {
+      if (Date.now() - start > maxMs) return false;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    return true;
+  }
+
+  async function init() {
+    try {
+      log("init() starting", {
+        env, appId, locationId, parentOrigin,
+        href: location.href,
+        referrer: document.referrer || "(empty)",
+        isSecureContext: window.isSecureContext
+      });
+
+      if (parentOrigin === "*") {
+        log("WARNING: parentOrigin is '*'. For security + reliability, pass parentOrigin from Flutter.", null);
+      }
+
+      if (!window.isSecureContext) {
+        const msg = "Not a secure context (must be HTTPS).";
+        setStatus(msg);
+        log(msg);
+        post({ type: "squareError", message: msg });
+        return;
+      }
+
+      if (!appId || !locationId) {
+        const msg = `Missing appId or locationId. appId=${appId || "(empty)"} locationId=${locationId || "(empty)"}`;
+        setStatus(msg);
+        log(msg);
+        post({ type: "squareError", message: msg });
+        return;
+      }
+
+      const appOk =
+        (env === "sandbox" && appId.startsWith("sandbox-sq0idb-")) ||
+        (env === "production" && appId.startsWith("sq0idb-"));
+
+      if (!appOk) {
+        const msg = `Invalid applicationId format for env=${env}. appId=${appId}`;
+        setStatus(msg);
+        log(msg);
+        post({ type: "squareError", message: msg });
+        return;
+      }
+
+      log("Waiting for window.Square...");
+      const ok = await waitForSquare();
+      if (!ok) {
+        const msg = "Square SDK did not become available (window.Square missing).";
+        setStatus(msg);
+        log(msg);
+        post({ type: "squareError", message: msg });
+        return;
+      }
+
+      log("Creating payments instance...");
+      const payments = window.Square.payments(appId, locationId);
+
+      log("Creating card instance...");
+      card = await payments.card();
+
+      log("Attaching card...");
+      await card.attach("#card-container");
+
+      setEnabled(true);
+      setStatus("");
+      log("Card attached successfully.");
+      post({ type: "squareReady" });
+    } catch (e) {
+      const msg = e?.message || String(e);
+      setStatus(msg);
+      log("init() error", { name: e?.name, message: msg, stack: e?.stack, raw: e });
+      post({ type: "squareError", message: msg });
+    }
+  }
+
+  async function tokenize() {
+    setEnabled(false);
+    setStatus("");
+    log("tokenize() clicked");
+
+    try {
+      if (!card) {
+        const msg = "Card is not initialized (card=null).";
+   
+::contentReference[oaicite:0]{index=0}
