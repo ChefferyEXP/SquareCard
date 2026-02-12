@@ -4,8 +4,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; }
-    #card-container { margin: 10px 0; }
-    #payBtn { padding: 10px 14px; font-weight: 700; }
+    #card-container { margin: 10px 0; min-height: 48px; }
+    #payBtn { padding: 10px 14px; font-weight: 700; width: 100%; }
     #status { margin-top: 10px; font-weight: 700; white-space: pre-wrap; }
     #debug {
       margin-top: 12px;
@@ -18,6 +18,7 @@
       white-space: pre-wrap;
       max-height: 240px;
       overflow: auto;
+      display: none; /* hide until we log */
     }
   </style>
 </head>
@@ -32,88 +33,57 @@
   const env = (params.get("env") || "sandbox").toLowerCase();
   const appId = (params.get("appId") || "").trim();
   const locationId = (params.get("locationId") || "").trim();
-
-  // If you pass this from Flutter, we can lock down postMessage.
-  // If you don’t pass it yet, we’ll still post to "*", but we’ll WARN loudly.
   const parentOrigin = (params.get("parentOrigin") || "*").trim();
 
   const statusEl = document.getElementById("status");
   const debugEl = document.getElementById("debug");
   const btn = document.getElementById("payBtn");
 
-  function now() {
-    return new Date().toISOString().slice(11, 23);
-  }
-
-  function log(line, obj) {
-    const msg = `[${now()}] ${line}` + (obj ? `\n${safeStringify(obj)}` : "");
-    debugEl.textContent = (msg + "\n\n" + debugEl.textContent).slice(0, 8000);
-    // Also send to parent (Flutter) so you can see in Dart if you want
-    post({ type: "squareDebug", message: line, detail: obj || null });
-  }
-
-  function setStatus(t) {
-    statusEl.textContent = t || "";
-  }
-
-  function setEnabled(v) {
-    btn.disabled = !v;
-  }
+  function now() { return new Date().toISOString().slice(11, 23); }
 
   function safeStringify(x) {
-    try {
-      return JSON.stringify(x, Object.getOwnPropertyNames(x), 2);
-    } catch (_) {
-      try { return String(x); } catch (_) { return "[unstringifiable]"; }
-    }
+    try { return JSON.stringify(x, Object.getOwnPropertyNames(x), 2); }
+    catch (_) { try { return String(x); } catch (_) { return "[unstringifiable]"; } }
   }
 
   function post(obj) {
-    try {
-      window.parent.postMessage(obj, parentOrigin);
-    } catch (e) {
-      // If posting fails, at least log it locally
-      debugEl.textContent = `[${now()}] postMessage FAILED: ${e?.message || e}\n\n` + debugEl.textContent;
-    }
+    try { window.parent.postMessage(obj, parentOrigin); }
+    catch (e) { /* ignore */ }
   }
 
-  // Catch hidden errors
+  function log(line, obj) {
+    debugEl.style.display = "block";
+    const msg = `[${now()}] ${line}` + (obj ? `\n${safeStringify(obj)}` : "");
+    debugEl.textContent = (msg + "\n\n" + debugEl.textContent).slice(0, 8000);
+    post({ type: "squareDebug", message: line, detail: obj || null });
+  }
+
+  function setStatus(t) { statusEl.textContent = t || ""; }
+  function setEnabled(v) { btn.disabled = !v; }
+
   window.addEventListener("error", (e) => {
-    log("window.onerror", {
-      message: e.message,
-      filename: e.filename,
-      lineno: e.lineno,
-      colno: e.colno,
-      error: e.error ? { name: e.error.name, message: e.error.message, stack: e.error.stack } : null
-    });
+    log("window.onerror", { message: e.message, filename: e.filename, lineno: e.lineno, colno: e.colno });
     post({ type: "squareError", message: `JS error: ${e.message}` });
   });
 
   window.addEventListener("unhandledrejection", (e) => {
-    const reason = e.reason;
-    log("unhandledrejection", {
-      reasonType: typeof reason,
-      reason: reason,
-      reasonMessage: reason?.message,
-      reasonName: reason?.name,
-      reasonStack: reason?.stack
-    });
-    post({ type: "squareError", message: `Promise rejection: ${reason?.message || reason}` });
+    const r = e.reason;
+    log("unhandledrejection", { reason: r, message: r?.message, stack: r?.stack });
+    post({ type: "squareError", message: `Promise rejection: ${r?.message || r}` });
   });
 
-  // Load Square script
   const script = document.createElement("script");
   script.src = env === "production"
     ? "https://web.squarecdn.com/v1/square.js"
     : "https://sandbox.web.squarecdn.com/v1/square.js";
 
   script.onload = () => log("Square script loaded", { src: script.src });
-  script.onerror = (e) => {
-    log("Square script FAILED to load", { src: script.src, error: e });
-    setStatus("Square JS failed to load.");
-    post({ type: "squareError", message: "Square JS failed to load." });
+  script.onerror = () => {
+    const msg = "Square JS failed to load.";
+    setStatus(msg);
+    log(msg, { src: script.src });
+    post({ type: "squareError", message: msg });
   };
-
   document.head.appendChild(script);
 
   let card;
@@ -128,56 +98,50 @@
   }
 
   async function init() {
+    log("init() starting", { env, appId, locationId, parentOrigin, href: location.href, isSecureContext: window.isSecureContext });
+
+    if (!window.isSecureContext) {
+      const msg = "Not a secure context (must be HTTPS).";
+      setStatus(msg);
+      log(msg);
+      post({ type: "squareError", message: msg });
+      return;
+    }
+
+    if (!appId || !locationId) {
+      const msg =
+        "Missing appId/locationId in query params.\n\n" +
+        "Open via iframe with:\n" +
+        "?env=sandbox&appId=...&locationId=...&parentOrigin=https://your-site";
+      setStatus(msg);
+      log("Missing params", { appId, locationId });
+      post({ type: "squareError", message: msg });
+      return;
+    }
+
+    const okAppId =
+      (env === "sandbox" && appId.startsWith("sandbox-sq0idb-")) ||
+      (env === "production" && appId.startsWith("sq0idb-"));
+
+    if (!okAppId) {
+      const msg = `Invalid applicationId format for env=${env}. appId=${appId}`;
+      setStatus(msg);
+      log(msg);
+      post({ type: "squareError", message: msg });
+      return;
+    }
+
+    log("Waiting for window.Square...");
+    const ok = await waitForSquare();
+    if (!ok) {
+      const msg = "Square SDK did not become available (window.Square missing).";
+      setStatus(msg);
+      log(msg);
+      post({ type: "squareError", message: msg });
+      return;
+    }
+
     try {
-      log("init() starting", {
-        env, appId, locationId, parentOrigin,
-        href: location.href,
-        referrer: document.referrer || "(empty)",
-        isSecureContext: window.isSecureContext
-      });
-
-      if (parentOrigin === "*") {
-        log("WARNING: parentOrigin is '*'. For security + reliability, pass parentOrigin from Flutter.", null);
-      }
-
-      if (!window.isSecureContext) {
-        const msg = "Not a secure context (must be HTTPS).";
-        setStatus(msg);
-        log(msg);
-        post({ type: "squareError", message: msg });
-        return;
-      }
-
-      if (!appId || !locationId) {
-        const msg = `Missing appId or locationId. appId=${appId || "(empty)"} locationId=${locationId || "(empty)"}`;
-        setStatus(msg);
-        log(msg);
-        post({ type: "squareError", message: msg });
-        return;
-      }
-
-      const appOk =
-        (env === "sandbox" && appId.startsWith("sandbox-sq0idb-")) ||
-        (env === "production" && appId.startsWith("sq0idb-"));
-
-      if (!appOk) {
-        const msg = `Invalid applicationId format for env=${env}. appId=${appId}`;
-        setStatus(msg);
-        log(msg);
-        post({ type: "squareError", message: msg });
-        return;
-      }
-
-      log("Waiting for window.Square...");
-      const ok = await waitForSquare();
-      if (!ok) {
-        const msg = "Square SDK did not become available (window.Square missing).";
-        setStatus(msg);
-        log(msg);
-        post({ type: "squareError", message: msg });
-        return;
-      }
-
       log("Creating payments instance...");
       const payments = window.Square.payments(appId, locationId);
 
@@ -194,7 +158,7 @@
     } catch (e) {
       const msg = e?.message || String(e);
       setStatus(msg);
-      log("init() error", { name: e?.name, message: msg, stack: e?.stack, raw: e });
+      log("init() error", { message: msg, stack: e?.stack, raw: e });
       post({ type: "squareError", message: msg });
     }
   }
@@ -207,5 +171,35 @@
     try {
       if (!card) {
         const msg = "Card is not initialized (card=null).";
-   
-::contentReference[oaicite:0]{index=0}
+        setStatus(msg);
+        log(msg);
+        post({ type: "squareError", message: msg });
+        setEnabled(true);
+        return;
+      }
+
+      const r = await card.tokenize();
+      log("tokenize() result", r);
+
+      if (r.status === "OK" && r.token) {
+        post({ type: "squareToken", token: r.token });
+      } else {
+        const msg = (r.errors || []).map(x => x.message).join(" | ") || "Tokenize failed";
+        setStatus(msg);
+        post({ type: "squareError", message: msg });
+        setEnabled(true);
+      }
+    } catch (e) {
+      const msg = e?.message || String(e);
+      setStatus(msg);
+      log("tokenize() error", { message: msg, stack: e?.stack, raw: e });
+      post({ type: "squareError", message: msg });
+      setEnabled(true);
+    }
+  }
+
+  document.getElementById("payBtn").addEventListener("click", tokenize);
+  init();
+</script>
+</body>
+</html>
